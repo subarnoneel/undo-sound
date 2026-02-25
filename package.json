@@ -1,8 +1,8 @@
 {
   "name": "undo-sound",
   "displayName": "Faaah Undo",
-  "description": "Plays a sound effect every time you undo (Ctrl+Z / Cmd+Z)",
-  "version": "1.0.0",
+  "description": "Plays a sound effect on undo, redo, and save",
+  "version": "1.1.0",
   "publisher": "subarnoneel",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -12,6 +12,8 @@
   },
   "keywords": [
     "undo",
+    "redo",
+    "save",
     "sound",
     "audio",
     "ctrl+z",
@@ -38,12 +40,27 @@
         "undo-sound.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable or disable the undo sound effect."
+          "description": "Enable or disable all sound effects."
         },
         "undo-sound.soundFilePath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to a custom .wav file to play on undo. Leave empty to use the default bundled sound."
+          "description": "Absolute path to a custom .wav file for undo. Leave empty to use the bundled sound."
+        },
+        "undo-sound.redoSoundFilePath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a custom .wav file for redo. Leave empty to use the bundled sound."
+        },
+        "undo-sound.saveSoundFilePath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a custom .wav file for save. Leave empty to use the bundled sound."
+        },
+        "undo-sound.toggleOnSoundFilePath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a custom .wav file that plays when sounds are toggled on. Leave empty to use the bundled sound."
         }
       }
     }

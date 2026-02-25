@@ -10,8 +10,9 @@ function info(msg: string): void { log.appendLine(`[INFO]  ${msg}`); }
 function warn(msg: string): void { log.appendLine(`[WARN]  ${msg}`); }
 
 // ── Persistent PowerShell process (Windows only) ─────────────────────────────
+// One process lives for the entire session. Each sound gets its own
+// $global:spXxx SoundPlayer variable so they never interfere.
 let psProc: ChildProcess | null = null;
-let psReady = false;
 
 function getPs(): ChildProcess {
 	if (!psProc || psProc.exitCode !== null || psProc.killed) {
@@ -21,11 +22,11 @@ function getPs(): ChildProcess {
 			['-NoProfile', '-NonInteractive', '-NoLogo', '-Command', '-'],
 			{ stdio: ['pipe', 'ignore', 'ignore'] }
 		);
-		psReady = false;
+		// Mark all players as needing re-init on respawn
 		psProc.on('exit', (code) => {
 			warn(`PowerShell process exited (code ${code}), will respawn on next play`);
 			psProc = null;
-			psReady = false;
+			for (const s of Object.values(sounds)) { s.psReady = false; }
 		});
 	}
 	return psProc;
@@ -35,81 +36,127 @@ function psRun(line: string): void {
 	getPs().stdin!.write(line + '\n');
 }
 
-// ── Sound path (resolved once, updated only on settings change) ───────────────
-let soundPath = '';
-let enabled = true;
+// ── Sound slot ────────────────────────────────────────────────────────────────
+// A reusable structure for each sound type (undo, redo, save).
+interface SoundSlot {
+	/** Setting key for the custom file path */
+	settingKey: string;
+	/** Default bundled WAV filename inside media/ */
+	defaultFile: string;
+	/** PowerShell variable name (e.g. $global:spUndo) */
+	psVar: string;
+	/** Resolved absolute path to the WAV file */
+	filePath: string;
+	/** Whether this slot's PS SoundPlayer is loaded */
+	psReady: boolean;
+	/** Last time this slot played (for debounce) */
+	lastPlayTime: number;
+}
 
-function resolveSound(context: vscode.ExtensionContext): string {
+const sounds: Record<string, SoundSlot> = {
+	undo:     { settingKey: 'soundFilePath',         defaultFile: 'undo.wav',      psVar: '$global:spUndo',     filePath: '', psReady: false, lastPlayTime: 0 },
+	redo:     { settingKey: 'redoSoundFilePath',     defaultFile: 'redo.wav',      psVar: '$global:spRedo',     filePath: '', psReady: false, lastPlayTime: 0 },
+	save:     { settingKey: 'saveSoundFilePath',     defaultFile: 'save.wav',      psVar: '$global:spSave',     filePath: '', psReady: false, lastPlayTime: 0 },
+	toggleOn: { settingKey: 'toggleOnSoundFilePath', defaultFile: 'toggle-on.wav', psVar: '$global:spToggleOn', filePath: '', psReady: false, lastPlayTime: 0 },
+};
+
+function resolveSlot(slot: SoundSlot, context: vscode.ExtensionContext): string {
 	const cfg = vscode.workspace.getConfiguration('undo-sound');
-	const custom = cfg.get<string>('soundFilePath', '').trim();
+	const custom = cfg.get<string>(slot.settingKey, '').trim();
 
 	if (custom) {
 		if (fs.existsSync(custom)) {
-			info(`Using custom sound: ${custom}`);
+			info(`[${slot.defaultFile}] Using custom sound: ${custom}`);
 			return custom;
 		}
-		warn(`Custom sound file not found: ${custom} — falling back to bundled sound`);
+		warn(`[${slot.defaultFile}] Custom path not found: ${custom} — falling back to bundled`);
 	}
 
-	const bundled = context.asAbsolutePath(path.join('media', 'undo.wav'));
+	const bundled = context.asAbsolutePath(path.join('media', slot.defaultFile));
 	if (fs.existsSync(bundled)) {
-		info(`Using bundled sound: ${bundled}`);
+		info(`[${slot.defaultFile}] Using bundled sound: ${bundled}`);
 		return bundled;
 	}
 
-	warn('No sound file found (no custom path, no media/undo.wav). Using system fallback.');
+	warn(`[${slot.defaultFile}] No sound file found. Will use system fallback.`);
 	return '';
 }
+
+function resolveAllSlots(context: vscode.ExtensionContext): void {
+	for (const slot of Object.values(sounds)) {
+		slot.filePath = resolveSlot(slot, context);
+	}
+}
+
+// ── Windows player init ───────────────────────────────────────────────────────
+function initWinSlot(slot: SoundSlot): void {
+	const escaped = slot.filePath.replace(/'/g, "''");
+	psRun(`${slot.psVar} = New-Object System.Media.SoundPlayer '${escaped}'; ${slot.psVar}.LoadSync()`);
+	slot.psReady = true;
+	info(`[${slot.defaultFile}] WAV loaded into memory (${slot.psVar} ready)`);
+}
+
+function initAllWinSlots(): void {
+	for (const slot of Object.values(sounds)) {
+		if (slot.filePath) { initWinSlot(slot); }
+	}
+}
+
+// ── Debounce ──────────────────────────────────────────────────────────────────
+const DEBOUNCE_MS = 80;
+
+// ── Playback ──────────────────────────────────────────────────────────────────
+function playSlot(slot: SoundSlot): void {
+	const now = Date.now();
+	if (now - slot.lastPlayTime < DEBOUNCE_MS) { return; }
+	slot.lastPlayTime = now;
+
+	if (process.platform === 'win32') {
+		if (slot.filePath) {
+			if (!slot.psReady) { initWinSlot(slot); }
+			psRun(`${slot.psVar}.Play()`);
+		} else {
+			psRun('[System.Media.SystemSounds]::Asterisk.Play()');
+		}
+	} else if (process.platform === 'darwin') {
+		if (slot.filePath) {
+			spawn('afplay', [slot.filePath], { stdio: 'ignore', detached: true }).unref();
+		}
+	} else {
+		if (slot.filePath) {
+			const p = spawn('aplay', [slot.filePath], { stdio: 'ignore', detached: true });
+			p.on('error', () =>
+				spawn('paplay', [slot.filePath], { stdio: 'ignore', detached: true }).unref()
+			);
+			p.unref();
+		}
+	}
+}
+
+// ── Status bar ────────────────────────────────────────────────────────────────
+let statusBarItem: vscode.StatusBarItem;
+
+function updateStatusBar(): void {
+	statusBarItem.text = enabled ? '$(unmute) Sounds' : '$(mute) Sounds';
+	statusBarItem.tooltip = enabled ? 'Undo Sound: ON — click to mute' : 'Undo Sound: OFF — click to unmute';
+}
+
+// ── Global state ──────────────────────────────────────────────────────────────
+let enabled = true;
+
+// Brief suppression flag — prevents the save sound from firing when
+// toggling writes to settings.json.
+let suppressSaveUntil = 0;
 
 function readEnabled(): boolean {
 	return vscode.workspace.getConfiguration('undo-sound').get<boolean>('enabled', true);
 }
 
-// Pre-load the WAV into a $global:sp SoundPlayer inside the persistent PS
-// process. LoadSync() reads the file into memory once; every Play() after
-// that fires from RAM with near-zero latency.
-function initWinPlayer(p: string): void {
-	const escaped = p.replace(/'/g, "''");
-	psRun(`$global:sp = New-Object System.Media.SoundPlayer '${escaped}'; $global:sp.LoadSync()`);
-	psReady = true;
-	info('WAV loaded into memory (SoundPlayer ready)');
-}
-
-// ── Debounce ──────────────────────────────────────────────────────────────────
-// When the user holds Ctrl+Z, VS Code fires many undo events in quick
-// succession. Without debounce each one would overlap and create a messy
-// audio pile-up. An 80 ms cooldown lets the sound finish its "attack" before
-// the next one fires — rapid undos sound clean instead of chaotic.
-const DEBOUNCE_MS = 80;
-let lastPlayTime = 0;
-
-// ── Playback ──────────────────────────────────────────────────────────────────
-function playSound(): void {
-	// Debounce: skip if we played very recently
-	const now = Date.now();
-	if (now - lastPlayTime < DEBOUNCE_MS) { return; }
-	lastPlayTime = now;
-
-	if (process.platform === 'win32') {
-		if (soundPath) {
-			if (!psReady) { initWinPlayer(soundPath); }
-			psRun('$global:sp.Play()');
-		} else {
-			psRun('[System.Media.SystemSounds]::Asterisk.Play()');
-		}
-	} else if (process.platform === 'darwin') {
-		if (soundPath) {
-			spawn('afplay', [soundPath], { stdio: 'ignore', detached: true }).unref();
-		}
-	} else {
-		if (soundPath) {
-			const p = spawn('aplay', [soundPath], { stdio: 'ignore', detached: true });
-			p.on('error', () =>
-				spawn('paplay', [soundPath], { stdio: 'ignore', detached: true }).unref()
-			);
-			p.unref();
-		}
-	}
+function setEnabled(value: boolean): void {
+	enabled = value;
+	vscode.workspace.getConfiguration('undo-sound')
+		.update('enabled', enabled, vscode.ConfigurationTarget.Global);
+	updateStatusBar();
 }
 
 // ── Extension lifecycle ───────────────────────────────────────────────────────
@@ -119,61 +166,85 @@ export function activate(context: vscode.ExtensionContext) {
 	info('Extension activating…');
 
 	enabled = readEnabled();
-	soundPath = resolveSound(context);
+	resolveAllSlots(context);
 
-	// Pre-warm: spawn the PS process and load the WAV into memory at activation
+	// ── Status bar item ──────────────────────────────────────────────────
+	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+	statusBarItem.command = 'undo-sound.toggle';
+	updateStatusBar();
+	statusBarItem.show();
+	context.subscriptions.push(statusBarItem);
+
+	// ── Pre-warm PS + load all WAVs into memory ──────────────────────────
 	if (process.platform === 'win32' && enabled) {
-		if (soundPath) { initWinPlayer(soundPath); }
-		else { getPs(); }
+		getPs();
+		initAllWinSlots();
 	}
 
-	// Toggle command (command palette: "Undo Sound: Toggle On/Off")
+	// ── Toggle command ───────────────────────────────────────────────────
 	context.subscriptions.push(
 		vscode.commands.registerCommand('undo-sound.toggle', () => {
-			enabled = !enabled;
-			const cfg = vscode.workspace.getConfiguration('undo-sound');
-			cfg.update('enabled', enabled, vscode.ConfigurationTarget.Global);
+			// Suppress the save sound that fires when settings.json is written
+			suppressSaveUntil = Date.now() + 500;
+
+			setEnabled(!enabled);
 			const state = enabled ? 'ON' : 'OFF';
 			vscode.window.showInformationMessage(`Undo Sound: ${state}`);
-			info(`Toggled ${state} via command palette`);
+			info(`Toggled ${state} via command / status bar`);
 
-			// Pre-warm the PS process when the user turns sound back ON
-			if (enabled && process.platform === 'win32') {
-				if (soundPath && !psReady) { initWinPlayer(soundPath); }
-				else if (!soundPath) { getPs(); }
+			// Pre-warm PS and play the toggle-on sound
+			if (enabled) {
+				if (process.platform === 'win32') { initAllWinSlots(); }
+				playSlot(sounds.toggleOn);
 			}
 		})
 	);
 
-	// React to settings changes
+	// ── Settings changes ─────────────────────────────────────────────────
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('undo-sound.enabled')) {
 				enabled = readEnabled();
+				suppressSaveUntil = Date.now() + 500;
+				updateStatusBar();
 				info(`Enabled setting changed — enabled=${enabled}`);
-				// Pre-warm when user enables via settings
-				if (enabled && process.platform === 'win32' && soundPath && !psReady) {
-					initWinPlayer(soundPath);
+				if (enabled && process.platform === 'win32') {
+					initAllWinSlots();
 				}
 			}
-			if (e.affectsConfiguration('undo-sound.soundFilePath')) {
-				const oldPath = soundPath;
-				soundPath = resolveSound(context);
-				if (soundPath !== oldPath && process.platform === 'win32') {
-					psReady = false;
-					if (enabled && soundPath) { initWinPlayer(soundPath); }
+
+			// Check each sound slot's custom path setting
+			for (const [name, slot] of Object.entries(sounds)) {
+				const fullKey = `undo-sound.${slot.settingKey}`;
+				if (e.affectsConfiguration(fullKey)) {
+					const oldPath = slot.filePath;
+					slot.filePath = resolveSlot(slot, context);
+					if (slot.filePath !== oldPath && process.platform === 'win32') {
+						slot.psReady = false;
+						if (enabled && slot.filePath) { initWinSlot(slot); }
+					}
+					info(`[${name}] Sound path changed — "${oldPath}" → "${slot.filePath}"`);
 				}
-				info(`Sound path changed — "${oldPath}" → "${soundPath}"`);
 			}
 		})
 	);
 
-	// Listen for undo events — zero interference with native Ctrl+Z speed
+	// ── Undo & Redo listener ─────────────────────────────────────────────
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeTextDocument(e => {
-			if (enabled && e.reason === vscode.TextDocumentChangeReason.Undo) {
-				playSound();
+			if (!enabled) { return; }
+			if (e.reason === vscode.TextDocumentChangeReason.Undo) {
+				playSlot(sounds.undo);
+			} else if (e.reason === vscode.TextDocumentChangeReason.Redo) {
+				playSlot(sounds.redo);
 			}
+		})
+	);
+
+	// ── Save listener ────────────────────────────────────────────────────
+	context.subscriptions.push(
+		vscode.workspace.onDidSaveTextDocument(() => {
+			if (enabled && Date.now() > suppressSaveUntil) { playSlot(sounds.save); }
 		})
 	);
 
