@@ -1,8 +1,8 @@
-# Faaah Undo 🔊
+# Faaah — Editor Action Sounds 🔊
 
-Plays a sound effect every time you **undo**, **redo**, or **save** in VS Code.
+Play satisfying sound effects on **undo**, **redo**, **save**, and more in VS Code.
 
-No configuration needed. Install it, and every action comes with audio feedback.
+No configuration needed. Install it, and every editor action comes with audio feedback.
 
 ## Features
 

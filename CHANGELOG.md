@@ -1,6 +1,14 @@
 # Changelog
 
-All notable changes to **Faaah Undo** will be documented in this file.
+All notable changes to **Faaah — Editor Action Sounds** will be documented in this file.
+
+## [1.1.1] - 2026-02-28
+
+### Changed
+
+- **Renamed** from "Faaah Undo" to "Faaah — Editor Action Sounds" to better reflect the full feature set
+- Updated description and branding
+- New extension icon
 
 ## [1.1.0] - 2026-02-26
 

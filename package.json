@@ -1,8 +1,8 @@
 {
   "name": "undo-sound",
-  "displayName": "Faaah Undo",
-  "description": "Plays a sound effect on undo, redo, and save",
-  "version": "1.1.0",
+  "displayName": "Faaah — Editor Action Sounds",
+  "description": "Play satisfying sound effects on undo, redo, save, and more — fully customizable with your own .wav files.",
+  "version": "1.1.1",
   "publisher": "subarnoneel",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -35,7 +35,7 @@
       }
     ],
     "configuration": {
-      "title": "Undo Sound",
+      "title": "Faaah — Editor Action Sounds",
       "properties": {
         "undo-sound.enabled": {
           "type": "boolean",
